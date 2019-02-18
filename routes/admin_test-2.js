@@ -50,7 +50,7 @@ function checkMakeCollection (collName, db) {
     });
 }
 
-client.connect('mongodb://localhost:27017/', function(err, client) {
+client.connect(url, function(err, client) {
     if (err) {
         console.error(err);
     }
@@ -66,7 +66,7 @@ client.connect('mongodb://localhost:27017/', function(err, client) {
     allActions = db.collection('allActions');
     playerInfo = db.collection('playerInfo');
 
-})
+});
 
 
 
@@ -210,33 +210,82 @@ function addUserLog (latest, key) {
 }
 
 
-function startUserListener(userId) {
+function startUserListener(userId, lastLogPulled) {
     if (runningListeners.indexOf(userId) == -1){
         runningListeners.push(userId);
-        admin.auth().app.database().ref("/users/" + userId + "/logs").on("child_added",(snapshot) =>{ 
+        //figure out a good approx for limitToLast given lastLogPulled and current Time
+        admin.auth().app.database().ref("/users/" + userId + "/logs").orderByChild('epochTime').limitToLast(100).on("child_added",(snapshot) =>{ 
             l = snapshot.val();
             newLog(snapshot, userId);
         });
     }
-
-    
 }
 
 
 function addUser(snap) {
     snapval = snap.val();
-    userObj = {snapval["userEmail"]: snap.key};
-    //add a teacher array to this userObj
-    //post this to a userLink thingie in the database
+    lastLogPulled = new Date().time;
+    playerInfo.findOne({'userId': snap.key}, function (err, result) {
+        if (err) {
+            console.log(err);
+        }
+        if (result) {
+            lastLogPulled = result["lastLogPulled"];
+        }
+        else {
+            userObj = {
+                "userEmail": snapval["userEmail"],
+                "userId": snap.key,
+                "teachers": [],
+                "creationTime": new Date(),
+                "creationEpoch": new Date().time,
+                "lastLogPulled": new Date().time,
+                "signedBands": [],
+                "signedBandNames": [],
+                "recordingSongs": [],
+                "releasedSongs": [],
+                "workingInsights": [],
+                "finishedInsights": [],
+                "graphMode": "",
+                "currentScreen": ""
+            };
+            //post this to a userLink thingie in the database
+            playerInfo.insertOne(userObj, (err, result) => {
+                if (err) {
+                    console.log(err);
+                }
+                
+            });            
+        }
+    })
+
+    startUserListener(snap.key, lastLogPulled);
 }
+
+
+/*
+    when this server starts, first look through listeners that could be running.
+    (addUser:) going through firestore's list of userIDs 
+        for each userID, 
+            see if it exists in playerInfo
+                get time of lastLog pulled.
+            if not 
+                add to playerinfo.
+                set lastLogPulled to 0.
+        (startListener:) start a firebase listener pulling logs more recent that lastLogPulled
+    
+    if a new child is added:
+        (cloud function should update firestore list)
+        and call addUser()
+*/
+
 
 admin.auth().app
     .database()
     .ref(`/users/`)
-    .limitToLast(1)
+    // .limitToLast(1)
     .on("child_added",(snapshot) =>{
-        console.log("reading dataaaa")
-        startUserListener(snapshot.key);
+        console.log("reading dataaaa");
         addUser(snapshot);
 });
 
@@ -254,13 +303,125 @@ each user has the following:
     storage/data management upgrades
     
 */
+
+function getNewBands (thisLog, pInfo) {
+    newBands = []
+    for (var i = 0; i < thisLog["signedBandInfo"]["numSignedBands"]; i++) {
+        bandkey = "signedBand" + String(i);
+        if (!(thisLog["signedBandInfo"][bandKey]["bandInfo"]["name"] in pInfo["signedBandNames"])) {
+            //make allActions log for adding ith band!
+            pInfo["signedBands"].push(thisLog["signedBandInfo"][bandKey]);
+            pInfo["signedBandNames"].push(thisLog["signedBandInfo"][bandKey]["bandInfo"]["name"]);
+            newBands.push(thisLog["signedBandInfo"][bandKey]);
+        }
+    }
+    if (newBands.length > 1) {
+        console.log("more than one new band found, something's off with " + thislog["_id"]);
+    }
+    return newBands;
+}
+
+function processLog(thislog, player) {
+    pInfo = player;
+    pInfo["currentScreen"] = thislog["currentScreen"];
+    pInfo["currentTurn"] = thislog["currentTurn"];
+    pInfo["currentCash"] = thislog["currentCash"];
+
+    var actionValue = thislog["actionValue"];
+    
+    //get userInfo from mongo 
+    // pInfo = playerInfo.findOne({"playerId": userId}, )
+    inferredLogObj = {
+        "logId": thislog["_id"],
+        "epochTime": thislog["epochTime"],
+        "realTimeUTC": thislog["realTimeUTC"],
+        "currentScreen": thislog["currentScreen"],
+        "currentTurn": thislog["currentTurn"],
+        "playerID": thislog["userId"]
+    };
+
+    if (thisLog["isLogVerbose"] == true) {
+        if (thisLog["signedBandInfo"]["numSignedBands"] != pInfo["signedBands"].length) {
+            // newBands = [];
+            newBands = getNewBands (thislog, pInfo)
+            inferredLogObj["eventKey"] = "newBand";
+            inferredLogObj["eventValue"] = newBands;
+            allActions.insert(inferredLogObj, (err, res) => {
+                if (err) {
+                    console.log(err);
+                }
+
+                if (res) {
+                    console.log("new band log!");
+                }
+            });
+            // newBand = a.filter(x => !b.includes(x));
+        }
+
+        // if (thisLog[""])
+    }
+
+
+
+    if (triggerAction == "clickedButton"){
+        if (actionValue == "TrendsButton") {
+            student["graphMode"] = "trendMaking";
+        }
+        else if(actionValue == "MarketingInsightButton") {
+            student["graphMode"] = "bar";   
+        }
+        else if (actionValue == "Bar") {
+            student["graphMode"] = "bar";
+        }
+        else if (actionValue == "Line") {
+            student["graphMode"] = "line";    
+        }
+        else if (actionValue == "Heatmap") {
+            student["graphMode"] = "heatmap";
+        }
+        else if(actionValue == "cancelButton"){
+            student["graphMode"] = "bar";
+        }
+
+        student["lastLogPulled"] = thislog["epochTime"];
+    }
+    //update pInfo
+}
+
 function newLog(snapshot, userId) {
     thislog = snapshot.val();
     key = snapshot.key;
     //remove useremail and post thislog to mongo
-    
-    //if it's a signed band, 
+    itemFound = 0;
+    allActions.findOne({'_id': key}, (err, item) => {
+        if (item) {
 
+        }
+        else {
+            thislog["_id"] = key
+            allActions.insert({thislog}, (err, item) => {
+                if (err) {
+                    console.log(err);
+                }
+
+                if (item) {
+                    playerInfo.findOne({"userId": userId}, (err, playerItem) => {
+                        if (err) {
+                            console.log(err);
+                        }
+
+                        if (playerItem) {
+                            processLog(item, playerItem);
+                        }
+                        else {
+                            console.log("player logs coming in but palyer not found!!!!");
+                        }
+                    });
+                    
+                }
+            });     
+        }
+    });
 
 
 }
